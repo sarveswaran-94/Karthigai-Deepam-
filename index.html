@@ -16,6 +16,8 @@
   #status{margin-top:12px;font-size:14px;color:#ffb878;min-height:20px}
   ul{text-align:left;margin:14px 0 0;padding-left:20px;color:#d9c3a5;font-size:14px;line-height:1.6}
 </style>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Tamil:wght@600&display=swap" rel="stylesheet">
 <script type="importmap">
 {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}
 </script>
@@ -28,9 +30,11 @@
   <button id="enter" disabled>Checking headset…</button>
   <div id="status"></div>
   <ul>
-    <li><b>Pinch / trigger</b> – on empty space: place a lamp. On a lamp: hold to carry it, release to drop</li>
-        <li><b>Thumbstick left/right</b> – turn the lamp (all lamps are the same size)</li>
-    <li><b>A / X</b> – blow out or relight a lamp &nbsp; <b>B / Y</b> – remove a lamp</li>
+    <li><b>Pinch / trigger</b> on empty space – place a lamp (up to 30)</li>
+    <li><b>Pinch / trigger and hold</b> on a lamp – carry it, release to drop it somewhere else</li>
+    <li><b>Quick tap</b> on a lamp – turn it 45° &nbsp;·&nbsp; <b>thumbstick left/right</b> turns it smoothly</li>
+    <li><b>Thumbstick up/down</b> or the small <b>− / +</b> panel – darker / clearer room (starts a little dark)</li>
+    <li><b>A / X</b> – blow out or relight &nbsp;·&nbsp; <b>B / Y</b> – remove &nbsp;·&nbsp; hands: pinch a lamp and hold still 1.5 s to remove</li>
     <li><b>Stick click</b> – Touch mode: lamp goes exactly at your controller tip</li>
   </ul>
 </div>
@@ -216,7 +220,7 @@ function setKind(lamp, kind) {
 }
 
 /* ---------- lamps, light pool ---------- */
-const MAX_LAMPS = 20;
+const MAX_LAMPS = 30;
 const lamps = [];
 const lightPool = Array.from({ length: 6 }, () => {
   const l = new THREE.PointLight(0xff9a3c, 0, 1.0, 2);
@@ -314,14 +318,13 @@ panel.renderOrder = 999;
 panel.visible = false;
 scene.add(panel);
 let panelUntil = 0;
-function showPanel(lines, seconds, big = false) {
+function showPanel(lines, seconds, sz = 46) {
   const g = panelCanvas.getContext('2d');
   g.clearRect(0, 0, 1024, 512);
   g.fillStyle = 'rgba(25,12,5,0.82)';
   g.beginPath(); g.roundRect(0, 0, 1024, 512, 48); g.fill();
   g.fillStyle = '#ffd9a8'; g.textAlign = 'center';
-  const sz = big ? 84 : 46;
-  g.font = `600 ${sz}px system-ui,sans-serif`;
+  g.font = `600 ${sz}px "Noto Sans Tamil", "Nirmala UI", "Latha", system-ui, sans-serif`;
   const lh = sz * 1.3, y0 = 256 - (lines.length - 1) * lh / 2 + sz * 0.35;
   lines.forEach((t, i) => g.fillText(t, 512, y0 + i * lh));
   panelTex.needsUpdate = true;
@@ -357,22 +360,90 @@ function pointedLamp(st) {
   return best;
 }
 
+const TAMIL_FULL = 'விளக்கு முடிந்தது';   // "velaku mudindhadhu" – the lamps are finished
+try { document.fonts && document.fonts.load('600 84px "Noto Sans Tamil"', TAMIL_FULL).catch(() => {}); } catch (e) {}
+
 function placeLamp(st) {
   if (!st || !st.valid || !st.target || !st.target.ok) return;
-  if (lamps.length >= MAX_LAMPS) { const old = lamps.shift(); scene.remove(old); }
+  if (lamps.length >= MAX_LAMPS) {
+    showPanel([TAMIL_FULL], 2.5, 84);
+    pulse(st.src, 0.8, 120);
+    return;
+  }
   const l = createDiya(false);
   l.position.copy(st.target.pos);
   l.rotation.y = ghostYaw;
-  l.scale.setScalar(ghostScale);
-  l.userData.s = ghostScale;
+  l.scale.setScalar(LAMP_SCALE);
   setKind(l, st.target.kind === 'air' ? 'air' : 'surface');
   scene.add(l);
   lamps.push(l);
   ghostYaw = Math.random() * Math.PI * 2;
   pulse(st.src, 0.5, 50);
-  if (!panel.visible || panelUntil - performance.now() < 3000) showPanel([lamps.length + ' / ' + MAX_LAMPS + ' lamps'], 1, true);
-  if (panel.visible && panelUntil - performance.now() > 3000) panelUntil = performance.now() + 1500;
+  if (lamps.length >= MAX_LAMPS) showPanel([TAMIL_FULL], 2.5, 84);
+  else showPanel([lamps.length + ' / ' + MAX_LAMPS], 1, 84);
 }
+
+function grab(st, lamp, bySelect) {
+  st.grabbed = lamp; st.grabbedBySelect = bySelect;
+  const tp = st.target ? st.target.pos : lamp.position;
+  st.grabOff = new THREE.Vector3(lamp.position.x - tp.x, 0, lamp.position.z - tp.z);
+  st.grabInfo = { t: performance.now(), pos: tp.clone(), moved: false };
+  pulse(st.src, 0.3, 30);
+}
+function removeLamp(l) {
+  const i = lamps.indexOf(l);
+  if (i >= 0) lamps.splice(i, 1);
+  scene.remove(l);
+}
+
+/* ---------- see-through dimming (passthrough opacity) ---------- */
+let dim = 0.35;                                   // starts slightly darker than normal passthrough
+const dimMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(25, 24, 16),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: dim, side: THREE.BackSide, depthWrite: false })
+);
+dimMesh.renderOrder = -100; dimMesh.frustumCulled = false; dimMesh.visible = false;
+scene.add(dimMesh);
+
+const ctlCanvas = document.createElement('canvas');
+ctlCanvas.width = 512; ctlCanvas.height = 160;
+const ctlTex = new THREE.CanvasTexture(ctlCanvas);
+ctlTex.colorSpace = THREE.SRGBColorSpace;
+const ctl = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.075), new THREE.MeshBasicMaterial({ map: ctlTex, transparent: true }));
+ctl.visible = false; ctl.renderOrder = 50;
+scene.add(ctl);
+function drawCtl() {
+  const g = ctlCanvas.getContext('2d');
+  g.clearRect(0, 0, 512, 160);
+  g.fillStyle = 'rgba(25,12,5,0.9)';
+  g.beginPath(); g.roundRect(0, 0, 512, 160, 40); g.fill();
+  g.fillStyle = '#ffb25c'; g.textAlign = 'center';
+  g.font = '700 110px system-ui,sans-serif'; g.fillText('−', 78, 110);
+  g.fillText('+', 434, 110);
+  g.fillStyle = '#ffd9a8'; g.font = '600 32px system-ui,sans-serif';
+  g.fillText('See-through ' + Math.round((1 - dim) * 100) + '%', 256, 66);
+  g.fillStyle = 'rgba(255,255,255,0.2)'; g.fillRect(150, 94, 212, 16);
+  g.fillStyle = '#ff9a3c'; g.fillRect(150, 94, 212 * (1 - dim / 0.9) , 16);
+  ctlTex.needsUpdate = true;
+}
+function setDim(v) {
+  dim = THREE.MathUtils.clamp(v, 0, 0.9);
+  dimMesh.material.opacity = dim;
+  drawCtl();
+}
+drawCtl();
+const rc = new THREE.Raycaster();
+function hitCtl(st) {
+  if (!ctl.visible) return false;
+  rc.set(st.origin, st.dir); rc.far = 6;
+  const h = rc.intersectObject(ctl)[0];
+  if (!h) return false;
+  if (h.uv.x < 0.3) setDim(dim + 0.1); else if (h.uv.x > 0.7) setDim(dim - 0.1);
+  pulse(st.src, 0.3, 30);
+  return true;
+}
+const ctlTarget = new THREE.Vector3(), headP = new THREE.Vector3(), headD = new THREE.Vector3(), headR = new THREE.Vector3(), tmpTo = new THREE.Vector3();
+let ctlFollow = false;
 
 function startSession(s) {
   session = s;
@@ -384,22 +455,29 @@ function startSession(s) {
     const st = inputs.get(e.inputSource);
     if (!st) return;
     active = st;
-    const l = pointedLamp(st);          // pinching / trigger on a lamp picks it up
-    if (l) { st.grabbed = l; st.grabbedBySelect = true; pulse(st.src, 0.3, 30); }
-    else placeLamp(st);                 // pinching on empty space places a new one
+    if (hitCtl(st)) return;               // −/+ brightness panel
+    const l = pointedLamp(st);
+    if (l) grab(st, l, true);             // pinch / trigger on a lamp: carry it
+    else placeLamp(st);                   // on empty space: place a new one
   });
   s.addEventListener('selectend', e => {
     const st = inputs.get(e.inputSource);
-    if (st && st.grabbedBySelect) { st.grabbed = null; st.grabbedBySelect = false; pulse(st.src, 0.3, 30); }
+    if (!st || !st.grabbedBySelect) return;
+    const gi = st.grabInfo;
+    if (st.grabbed && gi && !gi.moved && performance.now() - gi.t < 350) {
+      st.grabbed.rotation.y += Math.PI / 4;   // quick tap: turn the lamp 45°
+      pulse(st.src, 0.3, 30);
+    }
+    st.grabbed = null; st.grabbedBySelect = false; st.grabInfo = null;
   });
   s.addEventListener('squeezestart', e => {
     const st = inputs.get(e.inputSource);
     const l = pointedLamp(st);
-    if (l) { st.grabbed = l; pulse(st.src, 0.3, 30); }
+    if (l) grab(st, l, false);
   });
   s.addEventListener('squeezeend', e => {
     const st = inputs.get(e.inputSource);
-    if (st) st.grabbed = null;
+    if (st && !st.grabbedBySelect) { st.grabbed = null; st.grabInfo = null; }
   });
   Array.from(s.inputSources).forEach(addSource);
   frameCount = 0;
@@ -408,11 +486,12 @@ function startSession(s) {
 renderer.xr.addEventListener('sessionstart', () => {
   startSession(renderer.xr.getSession());
   previewLamp.visible = false;
+  dimMesh.visible = true;
 });
 renderer.xr.addEventListener('sessionend', () => {
   inputs.forEach((st, src) => removeSource(src));
   session = null; active = null;
-  ghost.visible = false; panel.visible = false;
+  ghost.visible = false; panel.visible = false; ctl.visible = false; dimMesh.visible = false;
   previewLamp.visible = true;
   document.getElementById('ui').style.display = '';
 });
@@ -461,8 +540,10 @@ function updateXR(frame, dt) {
     const gp = src.gamepad;
     if (gp) {
       const ax = gp.axes[2] || 0, ay = gp.axes[3] || 0;
-      const subject = st.grabbed;
-      if (Math.abs(ax) > 0.15) {
+      if (Math.abs(ay) > 0.15 && Math.abs(ay) > Math.abs(ax)) {
+        setDim(dim + ay * dt * 0.5);          // stick up = clearer room, down = darker
+      } else if (Math.abs(ax) > 0.15) {
+        const subject = st.grabbed || pointedLamp(st);   // turn the lamp you hold / point at
         if (subject) subject.rotation.y += ax * dt * 2.5; else ghostYaw += ax * dt * 2.5;
       }
       // edge-triggered buttons
@@ -480,15 +561,25 @@ function updateXR(frame, dt) {
       }
       if (edge(5)) {
         const l = pointedLamp(st) || lamps[lamps.length - 1];
-        if (l) { scene.remove(l); lamps.splice(lamps.indexOf(l), 1); pulse(src, 0.6, 60); }
+        if (l) { removeLamp(l); pulse(src, 0.6, 60); showPanel([lamps.length + ' / ' + MAX_LAMPS], 1, 84); }
       }
       st.prev = gp.buttons.map(x => x.pressed);
     }
 
     // carry a grabbed lamp
     if (st.grabbed) {
-      st.grabbed.position.copy(target.pos);
+      st.grabbed.position.set(target.pos.x + st.grabOff.x, target.pos.y, target.pos.z + st.grabOff.z);
       setKind(st.grabbed, target.kind === 'air' ? 'air' : 'surface');
+      const gi = st.grabInfo;
+      if (gi) {
+        if (!gi.moved && target.pos.distanceTo(gi.pos) > 0.02) gi.moved = true;
+        // hands: pinch and hold a lamp perfectly still for 1.5 s to remove it
+        if (!gi.moved && src.hand && performance.now() - gi.t > 1500) {
+          removeLamp(st.grabbed);
+          st.grabbed = null; st.grabbedBySelect = false; st.grabInfo = null;
+          showPanel([lamps.length + ' / ' + MAX_LAMPS], 1, 84);
+        }
+      }
     }
   }
 
@@ -502,7 +593,23 @@ function updateXR(frame, dt) {
     ring.material.color.set(st.target.ok ? 0xffc27a : 0xff4a3a);
   } else ghost.visible = false;
 
-  if (++frameCount === 6) showPanel(['🪔 Diya Placer', 'Pinch/trigger: place, or hold on a lamp to move it', 'Stick: turn lamp', 'A/X: light on/off   B/Y: remove', 'Stick click: touch mode'], 14);
+  if (++frameCount === 6) showPanel(['Pinch / trigger: place a lamp', 'Hold on a lamp: move it', 'Tap a lamp: turn it  (stick ◀ ▶ too)', 'Stick ▲ ▼ or − / + : room brightness', 'A/X: light on/off   B/Y: remove', 'Hands: hold a lamp still 1.5 s = remove'], 16, 34);
+  if (frameCount >= 3) {   // brightness panel stays in the lower-left of your view
+    const cam = renderer.xr.getCamera();
+    cam.getWorldPosition(headP); cam.getWorldDirection(headD);
+    headD.y = 0; if (headD.lengthSq() < 1e-4) headD.set(0, 0, -1); headD.normalize();
+    headR.crossVectors(headD, UP);
+    ctlTarget.copy(headP).addScaledVector(headD, 0.7).addScaledVector(headR, -0.3); ctlTarget.y = headP.y - 0.42;
+    if (!ctl.visible) { ctl.position.copy(ctlTarget); ctl.visible = true; }
+    tmpTo.copy(ctl.position).sub(headP); tmpTo.y = 0;
+    const dist = tmpTo.length(); tmpTo.normalize();
+    if (tmpTo.dot(headD) < 0.55 || dist > 1.5) ctlFollow = true;
+    if (ctlFollow) {
+      ctl.position.lerp(ctlTarget, 1 - Math.exp(-dt * 4));
+      if (ctl.position.distanceTo(ctlTarget) < 0.03) ctlFollow = false;
+    }
+    ctl.lookAt(headP.x, ctl.position.y, headP.z);
+  }
   if (panel.visible && performance.now() > panelUntil) panel.visible = false;
 }
 
